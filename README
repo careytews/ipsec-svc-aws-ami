@@ -1,0 +1,230 @@
+This README is wrong... it's the doc for the OpenVPN AMI.
+
+
+
+
+  *************************************************************************
+  * AWS AMI containing OpenVPN VPN service and cyberprobe monitoring tool *
+  *************************************************************************
+
+AMI creation
+============
+
+To create the image:
+
+- Run:
+
+    make ubuntu-cyberprobe_0.95-1_amd64.deb
+
+  This downloads cyberprobe 0.95.
+
+- Make sure you have Amazon CLI installed.  It's the awscli package.
+  Also install Python support which is in the package boto3.
+
+- Create a user to manage the builds on AWS.  e.g. build-manager.  Choose
+  'programmatic access' for access type.  Use 'attach existing policies'
+  and attach the AdministratorAccess policy.  Store the access key and
+  secret key, you will need them in the next step.
+
+- Run 'aws configure' to configure the key/secret into local configuration.
+  Specify a region i.e. eu-west-1.
+
+- Verify that your user can access AWS:
+
+    aws ec2 describe-instances
+
+  You should get a list of instances in JSON format.  If you get an error
+  message, something needs to be fixed.
+
+- Run: ./create_ami
+
+  This boots up an Ubuntu image, adds OpenVPN and cyberprobe, stops the
+  instance, creates an AMI image, and then tidies up.
+
+  In the process, an ssh keypair, security group and instance are created,
+  and if the process completes successfully, these are tidied up.
+
+
+Probe service creds
+===================
+
+You will need probe service creds from the Trust Networks analytics service.
+
+This should be provided by the service owner.
+
+  # Command like this to get POD ID.
+  kubectl get pods | grep ^probe-ca-
+  
+  # Create creds
+  kubectl exec probe-ca-1021-e9i67 create 'Trust Networks UK VPN' operations@trustnetworks.com
+
+  # Download
+  kubectl exec probe-ca-1021-e9i67 cat /ca/pkg.80DB2C507.p12 > my.p12
+
+Take the P12 file and unpack it.  Replace file.p12 and PASS with your filename
+and password respectively...
+
+  openssl pkcs12 -in file.p12 -passin pass:PASS -nodes -nocerts > probe-key.vpn
+  openssl pkcs12 -in file.p12 -passin pass:PASS -nodes -clcerts > probe-cert.vpn
+  openssl pkcs12 -in file.p12 -passin pass:PASS -nodes -cacerts > probe-cert.ca
+
+
+Create the cred package
+=======================
+
+The cred package is a set of template configuration files, and a Makefile for
+initialising the VPN credentials.  To create it, place the three probe-* files
+in the top level directory and run:
+
+  make crypto.tgz
+
+This packages everything into a tar file called crypto.tgz.
+
+Deploying the AMI
+=================
+
+To use the AMI:
+
+- First, make sure you have a user with AWS administrator credentials
+  configured using aws configure.
+
+- Then, from the crypto package, the VPN needs credentials to be created:
+
+  make -f Makefile.certs
+
+- Make sure you have the three probe cred files in the directory:
+  probe-key.vpn, probe-cert.vpn, probe-cert.ca.
+
+- These need to be uploaded to Amazon S3.  The uploaded files need to be
+  secret - only the VPN admins need to see them, so suggest create a new
+  bucket you can maintain locked-down restrictions against.
+  Say the bucket is my-enterprise-vpn and I decide upon a directory to put
+  the data in i.e. my-enterprise-vpn/vpn.
+
+  make -f Makefile.certs upload URL=s3://my-enterprise-vpn/vpn
+
+  Remember this URL, you will need it later.
+
+- Now, head to the IAM interface and define a VPN access policy for these
+  credentials.  Policies > Create Policy > Create Your Own Policy.
+  Give the policy a name like GetVPNCredentials, and use text like below for
+  your policy.  Replace my-enterprise-vpn with your bucket name.
+
+----------------------------------------------------------------------------
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": "s3:ListAllMyBuckets",
+            "Resource": "arn:aws:s3:::*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket",
+                "s3:GetBucketLocation"
+            ],
+            "Resource": "arn:aws:s3:::my-enterprise-vpn"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject"
+            ],
+            "Resource": "arn:aws:s3:::my-enterprise-vpn/*"
+        }
+    ]
+}
+----------------------------------------------------------------------------
+
+- Now create a Role, Roles -> Create New Role.  Call it anything you like
+  e.g. vpnProvider.
+
+- It's of type "AWS Service Roles", select Amazon EC2 i.e. allows EC2
+  instances to call AWS services on your behalf.
+
+- Select your policy i.e. GetVPNCredentials.
+
+- Launching the VPN service.  Go to EC2 console.  "Launch Instance".
+
+- Select the appropriate AMI, called 'openvpn-and-cyberprobe'.
+
+- Pick an instance type t2.micro should be fine.  There's some more things to
+  configure, so don't click Review and Launch!  Click "Next: Configure
+  Instance Details".
+
+- On the Instance Details there are two things to configure:
+
+  - Change the IAM role to the role you created above e.g. vpnProvider.
+
+  - In Advanced Details, set the user data field to be the S3 URL of your
+    config files e.g. s3://my-enterprise-vpn/vpn
+
+- You can used defaults for storage, but you need to make sure your security
+  group permits TCP port 443 through.  So, set up a security group allowing
+  TCP port 443, any source, and TCP port 22 (because I assume you want to
+  use SSH to administer.
+
+- Launch and select a keypair as you normally would.  Since the VPN is a
+  security appliance, you may want to create a new keypair distributed to
+  a limited set of people.
+
+- Once launched, you can check things are working.  The system consists
+  of 3 processes: cyberprobe, cyberprobe-sync and openvpn.
+
+
+Creating credentials
+====================
+
+To create credentials, having run the make commands above, the credentials
+can be used to sign certificates from this directory.
+
+- First, look in client.conf, the 'remote' line starts with the address of
+  the VPN.  Change to this to the IP address or DNS hostname of your VPN
+  server.
+
+- Create a CA directory:
+
+  mkdir ca
+
+- To issue a certificate
+  export CA=ca
+  ./create my-device-name user-email@address.com
+
+- It reports the name of the config file it creates.  Transfer to the client
+  device, attach to OpenVPN and you are ready to connect.
+
+- If at any time, you change the IP address of hostname of your VPN server,
+  you need to change the 'remote' line in each user's OpenVPN config file.
+
+
+Security considerations
+=======================
+
+Risk: remote exploitation of the VPN box
+- Minimise external access to the SSH port.  Ideally, the SSH port is only
+  accessible during maintainance operations, or is limited to known addresses.
+- The VPN port (443) looks like a standard TLS service, and doesn't
+  particularly
+- Regularly patch.  The AMI image has OpenVPN installed from the Ubuntu
+  package repository, so the standard system update tools can be used to
+  get updates.
+
+Risk: Denial-of-service of the public interface
+- The service does not respond to clients who do not have ta.key, which is a
+  defence against DoS.  All users of the VPN have a copy of ta.key, so
+  ensure users protect the VPN key that they are given.
+
+Risk: Attacker pretends to be the VPN.
+- Protect the VPN server key, and the CA key.  An attacker can only mimick the
+  VPN by either stealing the VPN server private key (key.server), or by
+  stealing the CA keyu (key.ca) and using it to sign a certificate which the
+  user trusts.
+
+Risk: Attacker steals admin access.
+- Protect your AWS credentials, and ensure only a limited set of people have
+  admin keys for the VPN.
+
+
+

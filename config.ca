@@ -1,0 +1,16 @@
+[req]
+prompt=no
+distinguished_name=dn
+req_extensions=v3_ca
+
+[dn]
+commonName=VPN CA
+organizationalUnitName=example.org Operations
+organizationName=example.org
+emailAddress=operations@example.org
+
+[v3_ca]
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid:always,issuer:always
+basicConstraints=CA:true
+
